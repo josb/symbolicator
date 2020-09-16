@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use actix_web::http::header;
 use actix_web::{client, HttpMessage};
-use failure::Fail;
+use anyhow::{Context, Result};
 use futures::compat::Stream01CompatExt;
 use futures::prelude::*;
 use url::Url;
 
-use super::{DownloadError, DownloadErrorKind, DownloadStatus, USER_AGENT};
+use super::{DownloadStatus, USER_AGENT};
 use crate::sources::{FileType, HttpSourceConfig, SourceFileId, SourceLocation};
 use crate::types::ObjectId;
 use crate::utils::futures as future_utils;
@@ -73,7 +73,7 @@ pub async fn download_source(
     source: Arc<HttpSourceConfig>,
     download_path: SourceLocation,
     destination: PathBuf,
-) -> Result<DownloadStatus, DownloadError> {
+) -> Result<DownloadStatus> {
     // This can effectively never error since the URL is always validated to be a base URL.
     // Though unfortunately this happens outside of this service, so ideally we'd fix this.
     let download_url = match join_url_encoded(&source.url, &download_path) {
@@ -90,7 +90,7 @@ pub async fn download_source(
                 let stream = response
                     .payload()
                     .compat()
-                    .map(|i| i.map_err(|e| e.context(DownloadErrorKind::Io).into()));
+                    .map(|i| i.map_err(|e| e.context("Failed to download")));
                 super::download_stream(
                     SourceFileId::Http(source, download_path),
                     stream,

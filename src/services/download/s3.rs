@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::{Context, Result};
 use bytes::BytesMut;
 use futures::compat::{Future01CompatExt, Stream01CompatExt};
 use futures01::Stream;
@@ -15,7 +16,7 @@ use parking_lot::Mutex;
 use rusoto_s3::S3;
 use tokio::codec::{BytesCodec, FramedRead};
 
-use super::{DownloadError, DownloadErrorKind, DownloadStatus};
+use super::DownloadStatus;
 use crate::sources::{FileType, S3SourceConfig, S3SourceKey, SourceFileId, SourceLocation};
 use crate::types::ObjectId;
 
@@ -61,7 +62,7 @@ pub async fn download_source(
     source: Arc<S3SourceConfig>,
     download_path: SourceLocation,
     destination: PathBuf,
-) -> Result<DownloadStatus, DownloadError> {
+) -> Result<DownloadStatus> {
     let key = source.get_key(&download_path);
     log::debug!("Fetching from s3: {} (from {})", &key, source.bucket);
 
@@ -88,7 +89,7 @@ pub async fn download_source(
 
             let stream = FramedRead::new(body_read, BytesCodec::new())
                 .map(BytesMut::freeze)
-                .map_err(|_err| DownloadError::from(DownloadErrorKind::Io))
+                .map_err(|e| e.context("Failed to download"))
                 .compat();
 
             super::download_stream(SourceFileId::S3(source, download_path), stream, destination)

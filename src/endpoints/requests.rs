@@ -1,6 +1,6 @@
 use actix::ResponseFuture;
 use actix_web::{http::Method, HttpResponse, Path, Query, State};
-use failure::Error;
+use anyhow::Error;
 use futures01::Future;
 use serde::Deserialize;
 

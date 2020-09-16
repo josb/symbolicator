@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use actix::ResponseFuture;
+use anyhow::{Context, Error, Result};
 use apple_crash_report_parser::AppleCrashReport;
 use bytes::{Bytes, IntoBuf};
-use failure::{Fail, ResultExt};
 use futures::{compat::Future01CompatExt, FutureExt as _, TryFutureExt};
 use futures01::future::{self, join_all, Future, IntoFuture, Shared};
 use futures01::sync::oneshot;
@@ -29,18 +29,13 @@ use symbolic::minidump::processor::{
 };
 use tokio::timer::Delay;
 
-use crate::actors::cficaches::{
-    CfiCacheActor, CfiCacheError, CfiCacheErrorKind, CfiCacheFile, FetchCfiCache,
-};
+use crate::actors::cficaches::{CfiCacheActor, CfiCacheFile, FetchCfiCache};
 use crate::actors::objects::{FindObject, ObjectPurpose, ObjectsActor};
-use crate::actors::symcaches::{
-    FetchSymCache, SymCacheActor, SymCacheError, SymCacheErrorKind, SymCacheFile,
-};
+use crate::actors::symcaches::{FetchSymCache, SymCacheActor, SymCacheFile};
 use crate::cache::CacheStatus;
-use crate::logging::LogError;
 use crate::sources::{FileType, SourceConfig};
 use crate::types::{
-    ArcFail, CompleteObjectInfo, CompleteStacktrace, CompletedSymbolicationResponse, FrameStatus,
+    CompleteObjectInfo, CompleteStacktrace, CompletedSymbolicationResponse, FrameStatus,
     ObjectFileStatus, ObjectId, ObjectType, RawFrame, RawObjectInfo, RawStacktrace, Registers,
     RequestId, Scope, Signal, SymbolicatedFrame, SymbolicationResponse, SystemInfo,
 };
@@ -63,7 +58,7 @@ lazy_static::lazy_static! {
 }
 
 /// Variants of `SymbolicationError`.
-#[derive(Debug, Fail)]
+/*#[derive(Debug, Fail)]
 pub enum SymbolicationErrorKind {
     #[fail(display = "symbolication took too long")]
     Timeout,
@@ -120,7 +115,7 @@ impl From<&SymbolicationError> for SymbolicationResponse {
             },
         }
     }
-}
+}*/
 
 // We want a shared future here because otherwise polling for a response would hold the global lock.
 type ComputationChannel = Shared<oneshot::Receiver<(Instant, SymbolicationResponse)>>;
@@ -242,10 +237,10 @@ impl SymbolicationActor {
         request_id: RequestId,
         timeout: Option<u64>,
         channel: ComputationChannel,
-    ) -> ResponseFuture<SymbolicationResponse, SymbolicationError> {
+    ) -> ResponseFuture<SymbolicationResponse, Error> {
         let rv = channel
             .map(|item| (*item).clone())
-            .map_err(|_| SymbolicationErrorKind::Canceled.into());
+            .map_err(|e| e.context("Computation was canceled internally"));
 
         if let Some(timeout) = timeout.map(Duration::from_secs) {
             Box::new(tokio::timer::Timeout::new(rv, timeout).then(move |result| {
@@ -277,7 +272,7 @@ impl SymbolicationActor {
     fn create_symbolication_request<F, R>(&self, f: F) -> RequestId
     where
         F: FnOnce() -> R,
-        R: Future<Item = CompletedSymbolicationResponse, Error = SymbolicationError> + 'static,
+        R: Future<Item = CompletedSymbolicationResponse, Error = Error> + 'static,
     {
         let (sender, receiver) = oneshot::channel();
 
@@ -392,7 +387,7 @@ impl SourceLookup {
         scope: Scope,
         sources: Arc<Vec<SourceConfig>>,
         response: &CompletedSymbolicationResponse,
-    ) -> Result<Self, SymbolicationError> {
+    ) -> Result<Self> {
         let mut referenced_objects = BTreeSet::new();
         let stacktraces = &response.stacktraces;
 
@@ -583,7 +578,7 @@ impl SymCacheLookup {
         self,
         symcache_actor: SymCacheActor,
         request: SymbolicateStacktraces,
-    ) -> Result<Self, SymbolicationError> {
+    ) -> Result<Self> {
         let mut referenced_objects = BTreeSet::new();
         let stacktraces = request.stacktraces;
 
@@ -922,7 +917,7 @@ impl SymbolicationActor {
     fn do_symbolicate(
         &self,
         request: SymbolicateStacktraces,
-    ) -> ResponseFuture<CompletedSymbolicationResponse, SymbolicationError> {
+    ) -> ResponseFuture<CompletedSymbolicationResponse, Error> {
         let result = self
             .clone()
             .do_symbolicate_impl(request)
@@ -933,7 +928,7 @@ impl SymbolicationActor {
             "symbolicate",
             Some((
                 Duration::from_secs(3600),
-                SymbolicationErrorKind::Timeout.into()
+                anyhow::anyhow!("Symbolication took too long")
             )),
             result
         ))
@@ -942,7 +937,7 @@ impl SymbolicationActor {
     async fn do_symbolicate_impl(
         self,
         request: SymbolicateStacktraces,
-    ) -> Result<CompletedSymbolicationResponse, SymbolicationError> {
+    ) -> Result<CompletedSymbolicationResponse> {
         let symcache_lookup: SymCacheLookup = request.modules.iter().cloned().collect();
         let source_lookup: SourceLookup = request.modules.iter().cloned().collect();
         let stacktraces = request.stacktraces.clone();
@@ -954,7 +949,7 @@ impl SymbolicationActor {
             .fetch_symcaches(self.symcaches, request)
             .await?;
 
-        let future = future::lazy(move || -> Result<_, SymbolicationError> {
+        let future = future::lazy(move || -> Result<_> {
             let stacktraces: Vec<_> = stacktraces
                 .into_iter()
                 .map(|trace| symbolicate_stacktrace(trace, &symcache_lookup, signal))
@@ -992,13 +987,13 @@ impl SymbolicationActor {
             .threadpool
             .spawn_handle(future.sentry_hub_current().compat())
             .await
-            .map_err(|_| SymbolicationErrorKind::Canceled)??;
+            .map_err(|e| e.context("Computation was canceled internally"))??;
 
         let source_lookup = source_lookup
             .fetch_sources(self.objects, scope, sources, &response)
             .await?;
 
-        let future = future::lazy(move || -> Result<_, SymbolicationError> {
+        let future = future::lazy(move || -> Result<_> {
             let debug_sessions = source_lookup.prepare_debug_sessions();
 
             for trace in &mut response.stacktraces {
@@ -1030,7 +1025,7 @@ impl SymbolicationActor {
             .threadpool
             .spawn_handle(future.sentry_hub_current().compat())
             .await
-            .map_err(|_| SymbolicationErrorKind::Canceled)??;
+            .map_err(|e| e.context("Computation was canceled internally"))??;
 
         Ok(result)
     }
@@ -1046,7 +1041,7 @@ impl SymbolicationActor {
         &self,
         request_id: RequestId,
         timeout: Option<u64>,
-    ) -> ResponseFuture<Option<SymbolicationResponse>, SymbolicationError> {
+    ) -> ResponseFuture<Option<SymbolicationResponse>, Error> {
         let channel_opt = self.requests.lock().get(&request_id).cloned();
         match channel_opt {
             Some(channel) => Box::new(
@@ -1064,7 +1059,7 @@ impl SymbolicationActor {
     }
 }
 
-type CfiCacheResult = (CodeModuleId, Result<Arc<CfiCacheFile>, Arc<CfiCacheError>>);
+type CfiCacheResult = (CodeModuleId, Result<Arc<CfiCacheFile>, Arc<Error>>);
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MinidumpState {
@@ -1103,7 +1098,7 @@ impl SymbolicationActor {
     fn get_referenced_modules_from_minidump(
         &self,
         minidump: Bytes,
-    ) -> ResponseFuture<Vec<(CodeModuleId, RawObjectInfo)>, SymbolicationError> {
+    ) -> ResponseFuture<Vec<(CodeModuleId, RawObjectInfo)>, Error> {
         let pool = self.spawnpool.clone();
         let diagnostics_cache = self.diagnostics_cache.clone();
         let lazy = future::lazy(move || {
@@ -1151,7 +1146,7 @@ impl SymbolicationActor {
             .spawn_handle(lazy.sentry_hub_current().compat())
             .boxed_local()
             .compat()
-            .map_err(|_| SymbolicationError::from(SymbolicationErrorKind::Canceled))
+            .map_err(|e| e.context("Computation was canceled internally"))
             .flatten();
 
         Box::new(future)
@@ -1168,10 +1163,10 @@ impl SymbolicationActor {
         metric: &str,
         minidump: Bytes,
         minidump_cache: crate::cache::Cache,
-    ) -> Result<T, SymbolicationError>
+    ) -> Result<T>
     where
         T: Serialize + DeserializeOwned,
-        E: Into<SymbolicationError> + Serialize + DeserializeOwned,
+        E: Into<Error> + Serialize + DeserializeOwned,
     {
         match handle.join_timeout(timeout) {
             Ok(Ok(procspawn::serde::Json(out))) => Ok(out),
@@ -1196,7 +1191,7 @@ impl SymbolicationActor {
                 metric!(counter(metric) += 1, "reason" => reason);
                 if let SymbolicationErrorKind::Canceled = kind {
                     Self::save_minidump(minidump, minidump_cache)
-                        .map_err(|e| log::error!("Failed to save minidump {}", LogError(&e)))
+                        .map_err(|e| log::error!("Failed to save minidump {:?}", &e))
                         .map(|r| {
                             if let Some(path) = r {
                                 sentry::configure_scope(|scope| {
@@ -1220,7 +1215,7 @@ impl SymbolicationActor {
     fn save_minidump(
         minidump: Bytes,
         failed_cache: crate::cache::Cache,
-    ) -> failure::Fallible<Option<PathBuf>> {
+    ) -> Result<Option<PathBuf>> {
         if let Some(dir) = failed_cache.cache_dir() {
             std::fs::create_dir_all(dir)?;
             let tmp = tempfile::NamedTempFile::new_in(dir)?;
@@ -1238,7 +1233,7 @@ impl SymbolicationActor {
         scope: Scope,
         requests: Vec<(CodeModuleId, RawObjectInfo)>,
         sources: Arc<Vec<SourceConfig>>,
-    ) -> ResponseFuture<Vec<CfiCacheResult>, SymbolicationError> {
+    ) -> ResponseFuture<Vec<CfiCacheResult>, Error> {
         let cficaches = self.cficaches.clone();
 
         let futures = requests
@@ -1265,7 +1260,7 @@ impl SymbolicationActor {
         minidump: Bytes,
         sources: Arc<Vec<SourceConfig>>,
         cfi_results: Vec<CfiCacheResult>,
-    ) -> ResponseFuture<(SymbolicateStacktraces, MinidumpState), SymbolicationError> {
+    ) -> ResponseFuture<(SymbolicateStacktraces, MinidumpState), Error> {
         let mut unwind_statuses = BTreeMap::new();
         let mut object_features = BTreeMap::new();
         let mut frame_info_map = BTreeMap::new();
@@ -1274,10 +1269,7 @@ impl SymbolicationActor {
             let cache_file = match result {
                 Ok(x) => x,
                 Err(e) => {
-                    log::debug!(
-                        "Error while fetching cficache: {}",
-                        LogError(&ArcFail(e.clone()))
-                    );
+                    log::debug!("Error while fetching cficache: {:?}", e.clone());
                     unwind_statuses.insert(*code_module_id, (&**e).into());
                     continue;
                 }
@@ -1293,9 +1285,9 @@ impl SymbolicationActor {
                     unwind_statuses.insert(*code_module_id, ObjectFileStatus::Missing);
                 }
                 CacheStatus::Malformed => {
-                    let e = CfiCacheError::from(CfiCacheErrorKind::ObjectParsing);
-                    log::warn!("Error while parsing cficache: {}", LogError(&e));
-                    unwind_statuses.insert(*code_module_id, (&e).into());
+                    let e = anyhow::anyhow!("Failed to parse object");
+                    log::warn!("Error while parsing cficache: {:?}", &e);
+                    unwind_statuses.insert(*code_module_id, e);
                 }
                 CacheStatus::Positive => {
                     frame_info_map.insert(*code_module_id, cache_file.path().to_owned());
@@ -1489,7 +1481,7 @@ impl SymbolicationActor {
             .spawn_handle(lazy.sentry_hub_current().compat())
             .boxed_local()
             .compat()
-            .map_err(|_| SymbolicationError::from(SymbolicationErrorKind::Canceled))
+            .map_err(|e| e.context("Computation was canceled internally"))
             .flatten()
             .then(move |x| {
                 // keep the results until symbolication has finished to ensure we don't drop
@@ -1506,13 +1498,12 @@ impl SymbolicationActor {
         scope: Scope,
         minidump: Bytes,
         sources: Vec<SourceConfig>,
-    ) -> impl futures::Future<Output = Result<(SymbolicateStacktraces, MinidumpState), SymbolicationError>>
-    {
+    ) -> impl futures::Future<Output = Result<(SymbolicateStacktraces, MinidumpState)>> {
         future_metrics!(
             "minidump_stackwalk",
             Some((
                 Duration::from_secs(1200),
-                SymbolicationErrorKind::Timeout.into()
+                anyhow::anyhow!("Symbolication took too long")
             )),
             async move {
                 let sources = Arc::new(sources);
@@ -1542,7 +1533,7 @@ impl SymbolicationActor {
         scope: Scope,
         minidump: Bytes,
         sources: Vec<SourceConfig>,
-    ) -> Result<CompletedSymbolicationResponse, SymbolicationError> {
+    ) -> Result<CompletedSymbolicationResponse> {
         let (request, state) = self
             .clone()
             .do_stackwalk_minidump(scope, minidump, sources)
@@ -1622,7 +1613,7 @@ impl SymbolicationActor {
         scope: Scope,
         minidump: Bytes,
         sources: Vec<SourceConfig>,
-    ) -> ResponseFuture<(SymbolicateStacktraces, AppleCrashReportState), SymbolicationError> {
+    ) -> ResponseFuture<(SymbolicateStacktraces, AppleCrashReportState), Error> {
         let parse_future = future::lazy(move || {
             let report = AppleCrashReport::from_reader(minidump.into_buf())?;
             let mut metadata = report.metadata;
@@ -1718,14 +1709,14 @@ impl SymbolicationActor {
             .spawn_handle(parse_future.sentry_hub_current().compat())
             .boxed_local()
             .compat()
-            .map_err(|_| SymbolicationError::from(SymbolicationErrorKind::Canceled))
+            .map_err(|e| e.context("Computation was canceled internally"))
             .flatten();
 
         Box::new(future_metrics!(
             "parse_apple_crash_report",
             Some((
                 Duration::from_secs(1200),
-                SymbolicationErrorKind::Timeout.into()
+                anyhow::anyhow!("Symbolication took too long")
             )),
             request_future,
         ))
@@ -1736,7 +1727,7 @@ impl SymbolicationActor {
         scope: Scope,
         report: Bytes,
         sources: Vec<SourceConfig>,
-    ) -> Result<CompletedSymbolicationResponse, SymbolicationError> {
+    ) -> Result<CompletedSymbolicationResponse> {
         let (request, state) = self
             .parse_apple_crash_report(scope, report, sources)
             .compat()
@@ -1823,8 +1814,6 @@ mod tests {
 
     use std::fs;
 
-    use failure::Error;
-
     use crate::app::ServiceState;
     use crate::config::Config;
     use crate::test;
@@ -1875,7 +1864,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_bucket() -> Result<(), Error> {
+    fn test_remove_bucket() -> Result<()> {
         // Test with sources first, and then without. This test should verify that we do not leak
         // cached debug files to requests that no longer specify a source.
 
@@ -1902,7 +1891,7 @@ mod tests {
     }
 
     #[test]
-    fn test_add_bucket() -> Result<(), Error> {
+    fn test_add_bucket() -> Result<()> {
         // Test without sources first, then with. This test should verify that we apply a new source
         // to requests immediately.
 
@@ -1928,7 +1917,7 @@ mod tests {
         Ok(())
     }
 
-    fn stackwalk_minidump(path: &str) -> Result<(), Error> {
+    fn stackwalk_minidump(path: &str) -> Result<()> {
         let (service, _cache_dir) = setup_service();
         let (_symsrv, source) = test::symbol_server();
 
@@ -1953,22 +1942,22 @@ mod tests {
     }
 
     #[test]
-    fn test_minidump_windows() -> Result<(), Error> {
+    fn test_minidump_windows() -> Result<()> {
         stackwalk_minidump("./tests/fixtures/windows.dmp")
     }
 
     #[test]
-    fn test_minidump_macos() -> Result<(), Error> {
+    fn test_minidump_macos() -> Result<()> {
         stackwalk_minidump("./tests/fixtures/macos.dmp")
     }
 
     #[test]
-    fn test_minidump_linux() -> Result<(), Error> {
+    fn test_minidump_linux() -> Result<()> {
         stackwalk_minidump("./tests/fixtures/linux.dmp")
     }
 
     #[test]
-    fn test_apple_crash_report() -> Result<(), Error> {
+    fn test_apple_crash_report() -> Result<()> {
         let (service, _cache_dir) = setup_service();
         let (_symsrv, source) = test::symbol_server();
 

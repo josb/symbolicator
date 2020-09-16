@@ -8,8 +8,7 @@ use std::time::Duration;
 
 use ::sentry::integrations::failure::capture_fail;
 use ::sentry::{configure_scope, Hub};
-
-use failure::{Fail, ResultExt};
+use anyhow::{Context, Error, Result};
 use futures::future::{FutureExt, TryFutureExt};
 use futures01::{future, Future};
 use symbolic::common::ByteView;
@@ -18,15 +17,14 @@ use tempfile::{tempfile_in, NamedTempFile};
 
 use crate::actors::common::cache::{CacheItemRequest, CachePath, Cacher};
 use crate::cache::{Cache, CacheKey, CacheStatus};
-use crate::logging::LogError;
 use crate::services::download::{DownloadService, DownloadStatus};
 use crate::sources::{FileType, SourceConfig, SourceFileId};
-use crate::types::{ArcFail, ObjectFeatures, ObjectId, Scope};
+use crate::types::{ObjectFeatures, ObjectId, Scope};
 use crate::utils::futures::ThreadPool;
 use crate::utils::objects;
 use crate::utils::sentry::{SentryFutureExt, WriteSentryScope};
 
-#[derive(Debug, Fail, Clone, Copy)]
+/*#[derive(Debug, Fail, Clone, Copy)]
 pub enum ObjectErrorKind {
     #[fail(display = "failed to download")]
     Io,
@@ -68,7 +66,7 @@ impl From<crate::services::download::DownloadError> for ObjectError {
             _ => source.context(ObjectErrorKind::Io).into(),
         }
     }
-}
+}*/
 
 /// This requests metadata of a single file at a specific path/url.
 #[derive(Clone, Debug)]
@@ -94,7 +92,7 @@ struct FetchFileDataRequest(FetchFileMetaRequest);
 
 impl CacheItemRequest for FetchFileMetaRequest {
     type Item = ObjectFileMeta;
-    type Error = ObjectError;
+    type Error = Error;
 
     fn get_cache_key(&self) -> CacheKey {
         CacheKey {
@@ -111,11 +109,11 @@ impl CacheItemRequest for FetchFileMetaRequest {
         let result = self
             .data_cache
             .compute_memoized(FetchFileDataRequest(self.clone()))
-            .map_err(|e| ObjectError::from(ArcFail(e).context(ObjectErrorKind::Caching)))
+            .map_err(|e| e.context("Failed to look into cache"))
             .and_then(move |data| {
                 if data.status == CacheStatus::Positive {
                     if let Ok(object) = Object::parse(&data.data) {
-                        let mut f = fs::File::create(path).context(ObjectErrorKind::Io)?;
+                        let mut f = fs::File::create(path).context("Failed persisting cache")?;
 
                         let meta = ObjectFeatures {
                             has_debug_info: object.has_debug_info(),
@@ -125,7 +123,7 @@ impl CacheItemRequest for FetchFileMetaRequest {
                         };
 
                         log::trace!("Persisting object meta for {}: {:?}", cache_key, meta);
-                        serde_json::to_writer(&mut f, &meta).context(ObjectErrorKind::Io)?;
+                        serde_json::to_writer(&mut f, &meta).context("Failed persisting cache")?;
                     }
                 }
 
@@ -159,7 +157,7 @@ impl CacheItemRequest for FetchFileMetaRequest {
 
 impl CacheItemRequest for FetchFileDataRequest {
     type Item = ObjectFile;
-    type Error = ObjectError;
+    type Error = Error;
 
     fn get_cache_key(&self) -> CacheKey {
         self.0.get_cache_key()
@@ -177,9 +175,12 @@ impl CacheItemRequest for FetchFileDataRequest {
             self.0.file_id.write_sentry_scope(scope);
         });
 
-        let download_dir = tryf!(path.parent().ok_or(ObjectErrorKind::NoTempDir)).to_owned();
+        let download_dir = tryf!(path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Unable to get directory for tempfiles")))
+        .to_owned();
         let download_file =
-            tryf!(NamedTempFile::new_in(&download_dir).context(ObjectErrorKind::Io));
+            tryf!(NamedTempFile::new_in(&download_dir).context("Failed to download"));
         let request = self
             .0
             .download_svc
@@ -187,15 +188,15 @@ impl CacheItemRequest for FetchFileDataRequest {
             .compat()
             .map_err(Into::into);
 
-        let result = request.and_then(move |status| -> Result<CacheStatus, ObjectError> {
+        let result = request.and_then(move |status| -> Result<CacheStatus> {
             match status {
                 DownloadStatus::Completed => {
                     log::trace!("Finished download of {}", cache_key);
                     let decompress_result = decompress_object_file(
                         &cache_key,
                         download_file.path(),
-                        download_file.reopen().context(ObjectErrorKind::Io)?,
-                        tempfile_in(download_dir).context(ObjectErrorKind::Io)?,
+                        download_file.reopen()?,
+                        tempfile_in(download_dir)?,
                     );
 
                     // Treat decompression errors as malformed files. It is more likely that
@@ -209,9 +210,7 @@ impl CacheItemRequest for FetchFileDataRequest {
                     // Since objects in Sentry (and potentially also other sources) might be
                     // multi-arch files (e.g. FatMach), we parse as Archive and try to
                     // extract the wanted file.
-                    decompressed
-                        .seek(SeekFrom::Start(0))
-                        .context(ObjectErrorKind::Io)?;
+                    decompressed.seek(SeekFrom::Start(0))?;
                     let view = ByteView::map_file(decompressed)?;
                     let archive = match Archive::parse(&view) {
                         Ok(archive) => archive,
@@ -219,7 +218,7 @@ impl CacheItemRequest for FetchFileDataRequest {
                             return Ok(CacheStatus::Malformed);
                         }
                     };
-                    let mut persist_file = fs::File::create(&path).context(ObjectErrorKind::Io)?;
+                    let mut persist_file = fs::File::create(&path)?;
                     if archive.is_multi() {
                         let object_opt = archive
                             .objects()
@@ -235,8 +234,7 @@ impl CacheItemRequest for FetchFileDataRequest {
                             None => return Ok(CacheStatus::Negative),
                         };
 
-                        io::copy(&mut object.data(), &mut persist_file)
-                            .context(ObjectErrorKind::Io)?;
+                        io::copy(&mut object.data(), &mut persist_file)?;
                     } else {
                         // Attempt to parse the object to capture errors. The result can be
                         // discarded as the object's data is the entire ByteView.
@@ -244,8 +242,7 @@ impl CacheItemRequest for FetchFileDataRequest {
                             return Ok(CacheStatus::Malformed);
                         }
 
-                        io::copy(&mut view.as_ref(), &mut persist_file)
-                            .context(ObjectErrorKind::Io)?;
+                        io::copy(&mut view.as_ref(), &mut persist_file)?;
                     }
 
                     Ok(CacheStatus::Positive)
@@ -260,7 +257,7 @@ impl CacheItemRequest for FetchFileDataRequest {
         let result = result
             .map_err(|e| {
                 capture_fail(e.cause().unwrap_or(&e));
-                e
+                e.context("Failed to download")
             })
             .sentry_hub_current();
 
@@ -268,7 +265,7 @@ impl CacheItemRequest for FetchFileDataRequest {
 
         Box::new(future_metrics!(
             "objects",
-            Some((Duration::from_secs(600), ObjectErrorKind::Timeout.into())),
+            Some((Duration::from_secs(600), anyhow::anyhow!("Object download took too long"))),
             result,
             "source_type" => type_name,
         ))
@@ -352,13 +349,13 @@ impl ObjectFile {
         self.status == CacheStatus::Positive
     }
 
-    pub fn parse(&self) -> Result<Option<Object<'_>>, ObjectError> {
+    pub fn parse(&self) -> Result<Option<Object<'_>>> {
         match self.status {
             CacheStatus::Positive => Ok(Some(
-                Object::parse(&self.data).context(ObjectErrorKind::Parsing)?,
+                Object::parse(&self.data).context("Failed to parse object")?,
             )),
             CacheStatus::Negative => Ok(None),
-            CacheStatus::Malformed => Err(ObjectErrorKind::Parsing.into()),
+            CacheStatus::Malformed => Err(anyhow::anyhow!("Failed to parse object")),
         }
     }
 
@@ -438,16 +435,16 @@ impl ObjectsActor {
     pub fn fetch(
         &self,
         shallow_file: Arc<ObjectFileMeta>,
-    ) -> impl Future<Item = Arc<ObjectFile>, Error = ObjectError> {
+    ) -> impl Future<Item = Arc<ObjectFile>, Error = Error> {
         self.data_cache
             .compute_memoized(FetchFileDataRequest(shallow_file.request.clone()))
-            .map_err(|e| ArcFail(e).context(ObjectErrorKind::Caching).into())
+            .map_err(|e| e.context("Failed to look into cache"))
     }
 
     pub fn find(
         &self,
         request: FindObject,
-    ) -> impl Future<Item = Option<Arc<ObjectFileMeta>>, Error = ObjectError> {
+    ) -> impl Future<Item = Option<Arc<ObjectFileMeta>>, Error = Error> {
         let FindObject {
             filetypes,
             scope,
@@ -471,7 +468,7 @@ impl ObjectsActor {
                             // the search by debug/code id. We do not surface those errors to the
                             // user (instead we default to an empty search result) and only report
                             // them internally.
-                            log::error!("Failed to download from {}: {}", type_name, LogError(&e));
+                            log::error!("Failed to download from {}: {:?}", type_name, &e);
                             Ok(Vec::new())
                         })
                 })
@@ -504,7 +501,7 @@ impl ObjectsActor {
 
                 meta_cache
                     .compute_memoized(request)
-                    .map_err(|e| ObjectError::from(ArcFail(e).context(ObjectErrorKind::Caching)))
+                    .map_err(|e| e.context("Failed to look into cache"))
                     // Errors from a file download should not make the entire join_all fail. We
                     // collect a Vec<Result> and surface the original error to the user only when
                     // we have no successful downloads.
@@ -523,7 +520,7 @@ impl ObjectsActor {
                     let object = match response {
                         Ok(object) => object,
                         Err(e) => {
-                            log::debug!("Failed to download: {}", LogError(e));
+                            log::debug!("Failed to download: {:?}", e);
                             return (3, *i);
                         }
                     };

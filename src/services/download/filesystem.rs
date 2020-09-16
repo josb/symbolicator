@@ -11,7 +11,9 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::{DownloadError, DownloadErrorKind, DownloadStatus};
+use anyhow::Result;
+
+use super::DownloadStatus;
 use crate::sources::{FileType, FilesystemSourceConfig, SourceFileId, SourceLocation};
 use crate::types::ObjectId;
 
@@ -20,7 +22,7 @@ pub fn download_source(
     source: Arc<FilesystemSourceConfig>,
     location: SourceLocation,
     dest: PathBuf,
-) -> Result<DownloadStatus, DownloadError> {
+) -> Result<DownloadStatus> {
     // All file I/O in this function is blocking!
     let abspath = source.join_loc(&location);
     log::debug!("Fetching debug file from {:?}", abspath);
@@ -28,7 +30,7 @@ pub fn download_source(
         Ok(_) => Ok(DownloadStatus::Completed),
         Err(e) => match e.kind() {
             io::ErrorKind::NotFound => Ok(DownloadStatus::NotFound),
-            _ => Err(DownloadError::from(DownloadErrorKind::Io)),
+            _ => Err(anyhow::anyhow!("Failed to download")),
         },
     }
 }

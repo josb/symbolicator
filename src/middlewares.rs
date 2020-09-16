@@ -3,8 +3,6 @@ use std::time::Instant;
 use actix_web::middleware::{Finished, Middleware, Response, Started};
 use actix_web::{Body, Error, HttpRequest, HttpResponse};
 
-use failure::Fail;
-
 /// Basic metrics
 pub struct Metrics;
 
@@ -49,10 +47,11 @@ impl ApiErrorResponse {
     }
 
     /// Creates an error response from a fail.
-    pub fn from_fail(fail: &dyn Fail) -> ApiErrorResponse {
+    pub fn from_error(error: &dyn std::error::Error) -> ApiErrorResponse {
         let mut messages = vec![];
 
-        for cause in Fail::iter_chain(fail) {
+        let mut err = error;
+        while let Some(cause) = err.source() {
             let msg = cause.to_string();
             if !messages.contains(&msg) {
                 messages.push(msg);

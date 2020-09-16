@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ::sentry::Hub;
+use anyhow::{Context, Result};
 use bytes::Bytes;
-use failure::{Fail, ResultExt};
 use futures::prelude::*;
 
 use crate::utils::futures::RemoteThread;
@@ -34,7 +34,7 @@ pub use crate::types::ObjectId;
 /// HTTP User-Agent string to use.
 const USER_AGENT: &str = concat!("symbolicator/", env!("CARGO_PKG_VERSION"));
 
-#[derive(Debug, Fail, Clone)]
+/*#[derive(Debug, Fail, Clone)]
 pub enum DownloadErrorKind {
     #[fail(display = "failed to download")]
     Io,
@@ -52,7 +52,7 @@ symbolic::common::derive_failure!(
     DownloadError,
     DownloadErrorKind,
     doc = "Errors happening while downloading from sources."
-);
+);*/
 
 /// Completion status of a successful download request.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -64,10 +64,7 @@ pub enum DownloadStatus {
 }
 
 /// Dispatches downloading of the given file to the appropriate source.
-async fn dispatch_download(
-    source: SourceFileId,
-    destination: PathBuf,
-) -> Result<DownloadStatus, DownloadError> {
+async fn dispatch_download(source: SourceFileId, destination: PathBuf) -> Result<DownloadStatus> {
     match source {
         SourceFileId::Sentry(source, loc) => {
             sentry::download_source(source, loc, destination).await
@@ -111,15 +108,14 @@ impl DownloadService {
         &self,
         source: SourceFileId,
         destination: PathBuf,
-    ) -> impl Future<Output = Result<DownloadStatus, DownloadError>> {
+    ) -> impl Future<Output = Result<DownloadStatus>> {
         let hub = Hub::current();
 
         self.worker
             .spawn("service.download", Duration::from_secs(300), move || {
                 dispatch_download(source, destination).bind_hub(hub)
             })
-            // Map all SpawnError variants into DownloadErrorKind::Canceled.
-            .map(|o| o.unwrap_or_else(|_| Err(DownloadErrorKind::Canceled.into())))
+            .map(|o| o.unwrap_or_else(|_| Err(anyhow::anyhow!("Download Canceled"))))
     }
 
     pub fn list_files(
@@ -128,7 +124,7 @@ impl DownloadService {
         filetypes: &'static [FileType],
         object_id: ObjectId,
         hub: Arc<Hub>,
-    ) -> impl Future<Output = Result<Vec<SourceFileId>, DownloadError>> {
+    ) -> impl Future<Output = Result<Vec<SourceFileId>>> {
         let worker = self.worker.clone();
         let config = self.config.clone();
 
@@ -141,8 +137,7 @@ impl DownloadService {
                     worker
                         .spawn("service.download.list_files", Duration::from_secs(30), job)
                         .await
-                        // Map all SpawnError variants into DownloadErrorKind::Canceled
-                        .unwrap_or_else(|_| Err(DownloadErrorKind::Canceled.into()))
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("Download Canceled")))
                 }
                 SourceConfig::Http(cfg) => Ok(http::list_files(cfg, filetypes, object_id)),
                 SourceConfig::S3(cfg) => Ok(s3::list_files(cfg, filetypes, object_id)),
@@ -160,18 +155,18 @@ impl DownloadService {
 /// This is common functionality used by all many downloaders.
 async fn download_stream(
     source: SourceFileId,
-    stream: impl Stream<Item = Result<Bytes, DownloadError>>,
+    stream: impl Stream<Item = Result<Bytes>>,
     destination: PathBuf,
-) -> Result<DownloadStatus, DownloadError> {
+) -> Result<DownloadStatus> {
     // All file I/O in this function is blocking!
     log::trace!("Downloading from {}", source);
-    let mut file = File::create(&destination).context(DownloadErrorKind::BadDestination)?;
+    let mut file = File::create(&destination).context("Bad file destination")?;
     futures::pin_mut!(stream);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
         file.write_all(chunk.as_ref())
-            .context(DownloadErrorKind::Write)?;
+            .context("Failed writing the downloaded file")?;
     }
     Ok(DownloadStatus::Completed)
 }

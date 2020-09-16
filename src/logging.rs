@@ -1,9 +1,7 @@
 use std::env;
-use std::fmt;
 use std::io::{self, Write};
 
 use chrono::{DateTime, Utc};
-use failure::AsFail;
 use log::{Level, LevelFilter};
 use sentry::integrations::log::{breadcrumb_from_record, event_from_record};
 use serde::{Deserialize, Serialize};
@@ -160,28 +158,6 @@ pub fn backtrace_enabled() -> bool {
     match std::env::var("RUST_BACKTRACE").as_ref().map(String::as_str) {
         Ok("1") | Ok("full") => true,
         _ => false,
-    }
-}
-
-/// A wrapper around a `Fail` that prints its causes.
-pub struct LogError<'a, E: AsFail>(pub &'a E);
-
-impl<'a, E: AsFail> fmt::Display for LogError<'a, E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let fail = self.0.as_fail();
-
-        write!(f, "{}", fail)?;
-        for cause in fail.iter_causes() {
-            write!(f, "\n  caused by: {}", cause)?;
-        }
-
-        if backtrace_enabled() {
-            if let Some(backtrace) = fail.backtrace() {
-                write!(f, "\n\n{:?}", backtrace)?;
-            }
-        }
-
-        Ok(())
     }
 }
 

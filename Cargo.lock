@@ -3159,7 +3159,6 @@ dependencies = [
  "crc32fast",
  "derive_more",
  "env_logger",
- "failure",
  "flate2",
  "futures 0.1.29",
  "futures 0.3.4",

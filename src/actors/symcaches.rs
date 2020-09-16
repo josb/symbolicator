@@ -1,10 +1,10 @@
 use std::fs::File;
-use std::io::{self, BufWriter};
+use std::io::BufWriter;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use failure::{Fail, ResultExt};
+use anyhow::{Context, Error, Result};
 use futures::{compat::Future01CompatExt, FutureExt, TryFutureExt};
 use futures01::future::{Either, Future, IntoFuture};
 use sentry::configure_scope;
@@ -20,7 +20,7 @@ use crate::types::{ObjectFeatures, ObjectId, ObjectType, Scope};
 use crate::utils::futures::ThreadPool;
 use crate::utils::sentry::{SentryFutureExt, WriteSentryScope};
 
-#[derive(Fail, Debug, Clone, Copy)]
+/*#[derive(Fail, Debug, Clone, Copy)]
 pub enum SymCacheErrorKind {
     #[fail(display = "failed to write symcache")]
     Io,
@@ -51,7 +51,7 @@ impl From<io::Error> for SymCacheError {
     fn from(e: io::Error) -> Self {
         e.context(SymCacheErrorKind::Io).into()
     }
-}
+}*/
 
 #[derive(Clone, Debug)]
 pub struct SymCacheActor {
@@ -82,12 +82,12 @@ pub struct SymCacheFile {
 }
 
 impl SymCacheFile {
-    pub fn parse(&self) -> Result<Option<SymCache<'_>>, SymCacheError> {
+    pub fn parse(&self) -> Result<Option<SymCache<'_>>> {
         match self.status {
             CacheStatus::Negative => Ok(None),
-            CacheStatus::Malformed => Err(SymCacheErrorKind::ObjectParsing.into()),
+            CacheStatus::Malformed => Err(anyhow::anyhow!("Failed to parse object")),
             CacheStatus::Positive => Ok(Some(
-                SymCache::parse(&self.data).context(SymCacheErrorKind::Parsing)?,
+                SymCache::parse(&self.data).context("Failed to parse symcache")?,
             )),
         }
     }
@@ -113,7 +113,7 @@ struct FetchSymCacheInternal {
 
 impl CacheItemRequest for FetchSymCacheInternal {
     type Item = SymCacheFile;
-    type Error = SymCacheError;
+    type Error = Error;
 
     fn get_cache_key(&self) -> CacheKey {
         self.object_meta.cache_key()
@@ -124,7 +124,7 @@ impl CacheItemRequest for FetchSymCacheInternal {
         let object = self
             .objects_actor
             .fetch(self.object_meta.clone())
-            .map_err(|e| SymCacheError::from(e.context(SymCacheErrorKind::Fetching)));
+            .map_err(|e| e.context("Failed to download object"));
 
         let threadpool = self.threadpool.clone();
         let result = object.and_then(move |object| {
@@ -149,7 +149,7 @@ impl CacheItemRequest for FetchSymCacheInternal {
                 .spawn_handle(future.sentry_hub_current().compat())
                 .boxed_local()
                 .compat()
-                .map_err(|_| SymCacheError::from(SymCacheErrorKind::Canceled))
+                .map_err(|e| e.context("Computation was canceled internally"))
                 .flatten()
         });
 
@@ -157,7 +157,7 @@ impl CacheItemRequest for FetchSymCacheInternal {
 
         Box::new(future_metrics!(
             "symcaches",
-            Some((Duration::from_secs(1200), SymCacheErrorKind::Timeout.into())),
+            Some((Duration::from_secs(1200), anyhow::anyhow!("Symcache building took too long"))),
             result,
             "num_sources" => &num_sources.to_string()
         ))
@@ -206,7 +206,7 @@ impl SymCacheActor {
     pub fn fetch(
         &self,
         request: FetchSymCache,
-    ) -> impl Future<Item = Arc<SymCacheFile>, Error = Arc<SymCacheError>> {
+    ) -> impl Future<Item = Arc<SymCacheFile>, Error = Arc<Error>> {
         let object = self
             .objects
             .find(FindObject {
@@ -216,7 +216,7 @@ impl SymCacheActor {
                 scope: request.scope.clone(),
                 purpose: ObjectPurpose::Debug,
             })
-            .map_err(|e| Arc::new(SymCacheError::from(e.context(SymCacheErrorKind::Fetching))));
+            .map_err(|e| Arc::new(e.context("Failed to download object")));
 
         let symcaches = self.symcaches.clone();
         let threadpool = self.threadpool.clone();
@@ -254,18 +254,15 @@ impl SymCacheActor {
     }
 }
 
-fn write_symcache(path: &Path, object: &ObjectFile) -> Result<(), SymCacheError> {
+fn write_symcache(path: &Path, object: &ObjectFile) -> Result<()> {
     configure_scope(|scope| {
         scope.set_transaction(Some("compute_symcache"));
         object.write_sentry_scope(scope);
     });
 
-    let symbolic_object = object
-        .parse()
-        .context(SymCacheErrorKind::ObjectParsing)?
-        .unwrap();
+    let symbolic_object = object.parse().context("Failed to parse object")?.unwrap();
 
-    let file = File::create(&path).context(SymCacheErrorKind::Io)?;
+    let file = File::create(&path).context("Failed to write symcache")?;
     let mut writer = BufWriter::new(file);
 
     log::debug!("Converting symcache for {}", object.cache_key());
@@ -273,14 +270,14 @@ fn write_symcache(path: &Path, object: &ObjectFile) -> Result<(), SymCacheError>
     if let Err(e) = SymCacheWriter::write_object(&symbolic_object, &mut writer) {
         match e.kind() {
             symcache::SymCacheErrorKind::WriteFailed => {
-                return Err(e.context(SymCacheErrorKind::Io).into())
+                return Err(e.context("Failed to write symcache"))
             }
-            _ => return Err(e.context(SymCacheErrorKind::ObjectParsing).into()),
+            _ => return Err(e.context("Failed to parse object")),
         }
     }
 
-    let file = writer.into_inner().context(SymCacheErrorKind::Io)?;
-    file.sync_all().context(SymCacheErrorKind::Io)?;
+    let file = writer.into_inner().context("Failed to write symcache")?;
+    file.sync_all().context("Failed to write symcache")?;
 
     Ok(())
 }

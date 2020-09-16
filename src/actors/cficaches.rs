@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use failure::{Fail, ResultExt};
+use anyhow::{Context, Error, Result};
 use futures::{compat::Future01CompatExt, FutureExt, TryFutureExt};
 use futures01::future::{Either, Future, IntoFuture};
 use sentry::configure_scope;
@@ -19,7 +19,7 @@ use crate::types::{ObjectFeatures, ObjectId, ObjectType, Scope};
 use crate::utils::futures::ThreadPool;
 use crate::utils::sentry::{SentryFutureExt, WriteSentryScope};
 
-#[derive(Fail, Debug, Clone, Copy)]
+/*#[derive(Fail, Debug, Clone, Copy)]
 pub enum CfiCacheErrorKind {
     #[fail(display = "failed to download")]
     Io,
@@ -50,7 +50,7 @@ impl From<io::Error> for CfiCacheError {
     fn from(e: io::Error) -> Self {
         e.context(CfiCacheErrorKind::Io).into()
     }
-}
+}*/
 
 #[derive(Clone, Debug)]
 pub struct CfiCacheActor {
@@ -107,7 +107,7 @@ struct FetchCfiCacheInternal {
 
 impl CacheItemRequest for FetchCfiCacheInternal {
     type Item = CfiCacheFile;
-    type Error = CfiCacheError;
+    type Error = Error;
 
     fn get_cache_key(&self) -> CacheKey {
         self.object_meta.cache_key()
@@ -118,7 +118,7 @@ impl CacheItemRequest for FetchCfiCacheInternal {
         let object = self
             .objects_actor
             .fetch(self.object_meta.clone())
-            .map_err(|e| CfiCacheError::from(e.context(CfiCacheErrorKind::Fetching)));
+            .map_err(|e| e.context("Failed to download object"));
 
         let threadpool = self.threadpool.clone();
         let result = object.and_then(move |object| {
@@ -143,7 +143,7 @@ impl CacheItemRequest for FetchCfiCacheInternal {
                 .spawn_handle(future.sentry_hub_current().compat())
                 .boxed_local()
                 .compat()
-                .map_err(|_| CfiCacheError::from(CfiCacheErrorKind::Canceled))
+                .map_err(|e| e.context("Computation was canceled internally"))
                 .flatten()
         });
 
@@ -151,7 +151,7 @@ impl CacheItemRequest for FetchCfiCacheInternal {
 
         Box::new(future_metrics!(
             "cficaches",
-            Some((Duration::from_secs(1200), CfiCacheErrorKind::Timeout.into())),
+            Some((Duration::from_secs(1200), anyhow::anyhow!("Cficache building took too long"))),
             result,
             "num_sources" => &num_sources.to_string()
         ))
@@ -195,7 +195,7 @@ impl CfiCacheActor {
     pub fn fetch(
         &self,
         request: FetchCfiCache,
-    ) -> impl Future<Item = Arc<CfiCacheFile>, Error = Arc<CfiCacheError>> {
+    ) -> impl Future<Item = Arc<CfiCacheFile>, Error = Arc<Error>> {
         let object = self
             .objects
             .find(FindObject {
@@ -205,7 +205,7 @@ impl CfiCacheActor {
                 scope: request.scope.clone(),
                 purpose: ObjectPurpose::Unwind,
             })
-            .map_err(|e| Arc::new(CfiCacheError::from(e.context(CfiCacheErrorKind::Fetching))));
+            .map_err(|e| Arc::new(e.context("Failed to download object")));
 
         let cficaches = self.cficaches.clone();
         let threadpool = self.threadpool.clone();
@@ -243,7 +243,7 @@ impl CfiCacheActor {
     }
 }
 
-fn write_cficache(path: &Path, object_file: &ObjectFile) -> Result<(), CfiCacheError> {
+fn write_cficache(path: &Path, object_file: &ObjectFile) -> Result<()> {
     configure_scope(|scope| {
         scope.set_transaction(Some("compute_cficache"));
         object_file.write_sentry_scope(scope);
@@ -251,18 +251,18 @@ fn write_cficache(path: &Path, object_file: &ObjectFile) -> Result<(), CfiCacheE
 
     let object = object_file
         .parse()
-        .context(CfiCacheErrorKind::ObjectParsing)?
+        .context("Failed to parse object")?
         .unwrap();
 
-    let file = File::create(&path).context(CfiCacheErrorKind::Io)?;
+    let file = File::create(&path).context("Failed to write Cficache")?;
     let writer = BufWriter::new(file);
 
     log::debug!("Converting cficache for {}", object_file.cache_key());
 
     CfiCache::from_object(&object)
-        .context(CfiCacheErrorKind::ObjectParsing)?
+        .context("Failed to parse object")?
         .write_to(writer)
-        .context(CfiCacheErrorKind::Io)?;
+        .context("Failed to write Cficache")?;
 
     Ok(())
 }
