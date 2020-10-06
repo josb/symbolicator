@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - release/**
+      - ci/test-cache
 
   pull_request:
 
@@ -39,9 +40,7 @@ jobs:
           override: true
 
       - name: Cache rust cargo artifacts
-        uses: swatinem/rust-cache@v1
-        with:
-          key: ${{ github.job }}
+        uses: swatinem/rust-cache@master
 
       - name: Run cargo fmt
         uses: actions-rs/cargo@v1
@@ -70,9 +69,7 @@ jobs:
           override: true
 
       - name: Cache rust cargo artifacts
-        uses: swatinem/rust-cache@v1
-        with:
-          key: ${{ github.job }}
+        uses: swatinem/rust-cache@master
 
       - name: Run cargo test
         uses: actions-rs/cargo@v1
@@ -95,9 +92,7 @@ jobs:
           override: true
 
       - name: Cache rust cargo artifacts
-        uses: swatinem/rust-cache@v1
-        with:
-          key: ${{ github.job }}
+        uses: swatinem/rust-cache@master
 
       - name: Build rust
         run: cargo build --locked
