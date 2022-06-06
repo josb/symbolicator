@@ -272,19 +272,17 @@ dependencies = [
 
 [[package]]
 name = "breakpad-symbols"
-version = "0.10.3"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b380c56e49149cc5459da00a15942dab5873861b1403ed74b768735df717286d"
+checksum = "4bd91dbd8c9c4a9ae92b043390cb669f18f6c46e94323fc155c5830f40fe9aa4"
 dependencies = [
  "async-trait",
  "circular",
- "debugid 0.7.3",
+ "debugid 0.8.0",
  "log",
- "minidump-common 0.10.4",
+ "minidump-common",
  "nom 1.2.4",
  "range-map",
- "reqwest 0.11.9",
- "tempfile",
  "thiserror",
 ]
 
@@ -1583,25 +1581,6 @@ dependencies = [
 
 [[package]]
 name = "minidump"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ccb06643400b8a48ebcaf69d5c4b6adf50cacaf3b5d6aa27bfbaf0da21156cc"
-dependencies = [
- "debugid 0.7.3",
- "encoding",
- "log",
- "memmap2",
- "minidump-common 0.10.4",
- "num-traits 0.2.14",
- "range-map",
- "scroll 0.11.0",
- "thiserror",
- "time 0.3.7",
- "uuid 0.8.2",
-]
-
-[[package]]
-name = "minidump"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe66b009ea76a4727d61e386f6e6e353d373a963954c8fe5b93da650eab7db5d"
@@ -1610,29 +1589,13 @@ dependencies = [
  "encoding",
  "log",
  "memmap2",
- "minidump-common 0.11.0",
+ "minidump-common",
  "num-traits 0.2.14",
  "range-map",
  "scroll 0.11.0",
  "thiserror",
  "time 0.3.7",
  "uuid 1.0.0",
-]
-
-[[package]]
-name = "minidump-common"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "190480ae87a21dc26a115c4ef5ce8c05c10074d55ea2042c472be7bf6dc6e592"
-dependencies = [
- "bitflags",
- "debugid 0.7.3",
- "enum-primitive-derive",
- "log",
- "num-traits 0.2.14",
- "range-map",
- "scroll 0.11.0",
- "smart-default",
 ]
 
 [[package]]
@@ -1653,17 +1616,17 @@ dependencies = [
 
 [[package]]
 name = "minidump-processor"
-version = "0.10.4"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d286bdf783be15a8677b971a8860d43f626823f757472a9e3c4d1d6f3e52b85d"
+checksum = "34b8fc0048d90e4d5e804f062e00ac2010c73b318434f2a13df08252346b5851"
 dependencies = [
  "async-trait",
  "breakpad-symbols",
- "debugid 0.7.3",
+ "debugid 0.8.0",
  "log",
  "memmap2",
- "minidump 0.10.4",
- "minidump-common 0.10.4",
+ "minidump",
+ "minidump-common",
  "scroll 0.11.0",
  "serde",
  "serde_json",
@@ -2363,7 +2326,6 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87f242f1488a539a79bac6dbe7c8609ae43b7914b7736210f239a37cccb32525"
 dependencies = [
- "async-compression",
  "base64",
  "bytes",
  "encoding_rs",
@@ -2388,7 +2350,6 @@ dependencies = [
  "serde_urlencoded",
  "tokio",
  "tokio-native-tls",
- "tokio-util 0.6.9",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3188,7 +3149,7 @@ dependencies = [
  "jsonwebtoken",
  "lazy_static",
  "lru",
- "minidump 0.11.0",
+ "minidump",
  "minidump-processor",
  "num_cpus",
  "parking_lot 0.12.1",
