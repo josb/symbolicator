@@ -174,19 +174,19 @@ impl S3Downloader {
                 match err1 {
                     ConstructionFailure(err) => {
                         println!("ERROR: ConstructionFailure: {:?}", err);
-                        return Ok(DownloadStatus::NotFound)
+                        return Ok(DownloadStatus::NotFound);
                     }
                     DispatchFailure(err) => {
                         println!("ERROR: DispatchFailure: {:?}", err);
-                        return Ok(DownloadStatus::NotFound)
+                        return Ok(DownloadStatus::NotFound);
                     }
                     TimeoutError(err) => {
                         println!("ERROR: TimeoutError: {:?}", err);
-                        return Ok(DownloadStatus::NotFound)
+                        return Ok(DownloadStatus::NotFound);
                     }
                     ResponseError(err) => {
                         println!("ERROR: ResponseError: {:?}", err);
-                        return Ok(DownloadStatus::NotFound)
+                        return Ok(DownloadStatus::NotFound);
                     }
                     ServiceError(ref err) => {
                         let raw = err.raw();
@@ -217,7 +217,7 @@ impl S3Downloader {
                             }
                             GetObjectErrorKind::NoSuchKey(err) => {
                                 println!("NoSuchKey: {:?}", err);
-                                return Ok(DownloadStatus::NotFound)
+                                return Ok(DownloadStatus::NotFound);
                             }
                             GetObjectErrorKind::Unhandled(err) => {
                                 println!("Unhandled: {:?}", err);
@@ -239,24 +239,21 @@ impl S3Downloader {
                             }
                         });
                         if let Some(code) = code {
-                            return Err(DownloadError::S3WithCode(
-                                status,
-                                code.to_string(),
-                            ));
+                            return Err(DownloadError::S3WithCode(status, code.to_string()));
                         } else {
                             return Err(DownloadError::S3(err1.into()));
                         }
                     }
                     err => {
                         println!("ERROR: Unhandled: {:?}", err);
-                        return Err(DownloadError::S3(err.into()))
+                        return Err(DownloadError::S3(err.into()));
                     }
                 }
             }
             Err(_) => {
                 // TODO Verify this is still the correct action to take with aws-sdk-rust
                 // Timed out
-                return Err(DownloadError::Canceled)
+                return Err(DownloadError::Canceled);
             }
         };
 
