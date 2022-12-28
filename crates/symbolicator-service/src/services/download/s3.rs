@@ -2,6 +2,7 @@
 //!
 //! Specifically this supports the [`S3SourceConfig`] source.
 
+use futures::TryStreamExt;
 use std::any::type_name;
 use std::fmt;
 use std::path::Path;
@@ -10,12 +11,10 @@ use std::time::Duration;
 
 use aws_config::meta::credentials::lazy_caching::LazyCachingCredentialsProvider;
 use aws_sdk_s3::error::GetObjectErrorKind;
-use aws_sdk_s3::types::SdkError::{ConstructionFailure, DispatchFailure};
-use aws_sdk_s3::types::SdkError::{ResponseError, ServiceError, TimeoutError};
-use aws_sdk_s3::Client;
+use aws_sdk_s3::types::SdkError::*;
+use aws_sdk_s3::{Client, ErrorExt};
 use aws_types::credentials::{Credentials, ProvideCredentials};
 use aws_types::region::Region;
-use futures::TryStreamExt;
 
 use symbolicator_sources::{
     AwsCredentialsProvider, FileType, ObjectId, S3SourceConfig, S3SourceKey,
@@ -170,51 +169,94 @@ impl S3Downloader {
 
         let response = match request.await {
             Ok(Ok(response)) => response,
-            Ok(Err(err)) => {
-                tracing::debug!("Skipping response from s3://{}/{}: {}", &bucket, &key, err);
-                return match &err {
-                    ConstructionFailure(err1) => {
-                        println!("ERROR: ConstructionFailure: {:?}", err1);
-                        Err(DownloadError::Canceled)
+            Ok(Err(err1)) => {
+                tracing::debug!("Skipping response from s3://{}/{}: {}", &bucket, &key, err1);
+                match err1 {
+                    ConstructionFailure(err) => {
+                        println!("ERROR: ConstructionFailure: {:?}", err);
+                        return Ok(DownloadStatus::NotFound)
                     }
-                    DispatchFailure(err1) => {
-                        println!("ERROR: DispatchFailure: {:?}", err1);
-                        Err(DownloadError::Canceled)
+                    DispatchFailure(err) => {
+                        println!("ERROR: DispatchFailure: {:?}", err);
+                        return Ok(DownloadStatus::NotFound)
                     }
-                    TimeoutError(err1) => {
-                        println!("ERROR: TimeoutError: {:?}", err1);
-                        Err(DownloadError::Canceled)
+                    TimeoutError(err) => {
+                        println!("ERROR: TimeoutError: {:?}", err);
+                        return Ok(DownloadStatus::NotFound)
                     }
-                    ResponseError { err: err1, raw: _ } => {
-                        println!("ERROR: ResponseError: {:?}", err1);
-                        Err(DownloadError::Canceled)
+                    ResponseError(err) => {
+                        println!("ERROR: ResponseError: {:?}", err);
+                        return Ok(DownloadStatus::NotFound)
                     }
-                    ServiceError { err: err1, raw: _ } => {
-                        println!("ServiceError: {:?}", &err1);
-                        match &err1.kind {
-                            GetObjectErrorKind::NoSuchKey(err2) => {
-                                println!("ERROR: NoSuchKey: {:?}", &err2);
+                    ServiceError(ref err) => {
+                        let raw = err.raw();
+                        println!("ERROR: ServiceError: raw: {:?}", raw);
+                        let http_response = raw.http();
+                        let body = http_response.body();
+                        let status = http_response.status();
+                        println!("HTTP status: {:?}", status);
+
+                        let get_object_error = err.err();
+                        let meta = get_object_error.meta();
+                        let message = meta.message();
+                        let code = meta.code();
+                        println!("GetObjectError meta: {:?}", meta);
+                        println!("GetObjectError meta.code: {:?}", code.unwrap());
+                        println!("GetObjectError meta.message: {:?}", message.unwrap());
+                        println!(
+                            "GetObjectError meta.request_id: {:?}",
+                            meta.request_id().unwrap()
+                        );
+                        println!(
+                            "GetObjectError meta.s3_extended_request_id: {:?}",
+                            meta.extended_request_id().unwrap()
+                        );
+                        match &get_object_error.kind {
+                            GetObjectErrorKind::InvalidObjectState(err) => {
+                                println!("InvalidObjectState: {:?}", err);
                             }
-                            GetObjectErrorKind::InvalidObjectState(err2) => {
-                                println!("ERROR: InvalidObjectState: {:?}", &err2);
+                            GetObjectErrorKind::NoSuchKey(err) => {
+                                println!("NoSuchKey: {:?}", err);
+                                return Ok(DownloadStatus::NotFound)
                             }
-                            GetObjectErrorKind::Unhandled(err2) => {
-                                println!("ERROR: Unhandled: {:?}", &err2);
-                                println!(
-                                    "bucket={:?}, key={:?}, source_key={:?}",
-                                    &bucket, &key, &source_key
-                                );
+                            GetObjectErrorKind::Unhandled(err) => {
+                                println!("Unhandled: {:?}", err);
                             }
-                            _ => println!("ERROR: other GetObjectErrorKind: {:?}", &err1.kind),
-                        };
-                        Err(DownloadError::S3(err.into()))
+                            err => {
+                                println!("Unknown: {:?}", err);
+                            }
+                        }
+                        sentry::configure_scope(|scope| {
+                            let body_text = body.bytes();
+                            if let Some(text) = body_text {
+                                scope.set_extra("AWS body:", text.into());
+                            }
+                            if let Some(message) = message {
+                                scope.set_extra("AWS message", message.into());
+                            }
+                            if let Some(code) = code {
+                                scope.set_extra("AWS code", code.into());
+                            }
+                        });
+                        if let Some(code) = code {
+                            return Err(DownloadError::S3WithCode(
+                                status,
+                                code.to_string(),
+                            ));
+                        } else {
+                            return Err(DownloadError::S3(err1.into()));
+                        }
                     }
-                };
+                    err => {
+                        println!("ERROR: Unhandled: {:?}", err);
+                        return Err(DownloadError::S3(err.into()))
+                    }
+                }
             }
             Err(_) => {
                 // TODO Verify this is still the correct action to take with aws-sdk-rust
                 // Timed out
-                return Err(DownloadError::Canceled);
+                return Err(DownloadError::Canceled)
             }
         };
 
@@ -318,27 +360,23 @@ mod tests {
 
         match head_result {
             Ok(_) => return,
-            Err(ServiceError {
-                err:
-                    HeadBucketError {
-                        kind: HeadBucketErrorKind::NotFound(err),
-                        ..
-                    },
-                ..
-            }) => {
-                println!("{:?}", err.message());
-            }
-            Err(ServiceError {
-                err:
-                    HeadBucketError {
-                        kind: HeadBucketErrorKind::Unhandled(err),
-                        ..
-                    },
-                ..
-            }) => {
-                println!("{:?}", err);
-            }
-            Err(err) => panic!("failed to check S3 bucket: {:?}", err),
+            Err(err) => match err.into_service_error() {
+                HeadBucketError {
+                    kind: HeadBucketErrorKind::NotFound(err),
+                    ..
+                } => {
+                    println!("{:?}", err.message())
+                }
+                HeadBucketError {
+                    kind: HeadBucketErrorKind::Unhandled(err),
+                    ..
+                } => {
+                    println!("{:?}", err)
+                }
+                err => {
+                    panic!("failed to check S3 bucket: {:?}", err)
+                }
+            },
         }
 
         s3_client
@@ -361,27 +399,17 @@ mod tests {
 
         match head_result {
             Ok(_) => return,
-            Err(ServiceError {
-                err:
-                    HeadObjectError {
-                        kind: HeadObjectErrorKind::NotFound(err),
-                        ..
-                    },
-                ..
-            }) => {
-                println!("{:?}", err.message());
-            }
-            Err(ServiceError {
-                err:
-                    HeadObjectError {
-                        kind: HeadObjectErrorKind::Unhandled(err),
-                        ..
-                    },
-                ..
-            }) => {
-                println!("{:?}", err);
-            }
-            Err(err) => panic!("failed to check S3 object: {:?}", err),
+            Err(err) => match err.into_service_error() {
+                HeadObjectError {
+                    kind: HeadObjectErrorKind::NotFound(err),
+                    ..
+                } => println!("{:?}", err.message()),
+                HeadObjectError {
+                    kind: HeadObjectErrorKind::Unhandled(err),
+                    ..
+                } => println!("{:?}", err),
+                err => panic!("failed to check S3 object: {:?}", err),
+            },
         }
 
         s3_client
